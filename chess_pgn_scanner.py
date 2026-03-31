@@ -451,7 +451,7 @@ class CorrectionDialog:
                                      selectbackground="#585b70",
                                      selectforeground="white",
                                      activestyle="none",
-                                     width=16, height=14,
+                                     width=24, height=14,
                                      yscrollcommand=ml_scroll.set,
                                      exportselection=False)
         ml_scroll.config(command=self._move_list.yview)
@@ -459,28 +459,41 @@ class CorrectionDialog:
         self._move_list.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         self._move_list.bind("<<ListboxSelect>>", self._on_list_select)
 
-        # Per-move edit box (shown when a move row is selected)
+        # Two-column edit section (White + Black)
         ml_edit = tk.Frame(ml_lf, bg=self.BG)
         ml_edit.pack(fill=tk.X, padx=4, pady=(0, 4))
 
-        self._list_edit_var = tk.StringVar()
-        self._list_entry = tk.Entry(ml_edit, textvariable=self._list_edit_var,
-                                    font=("Courier", 11), width=8,
-                                    bg="#313244", fg=self.FG,
-                                    insertbackground=self.FG,
-                                    relief="flat", bd=3)
-        self._list_entry.pack(side=tk.LEFT)
-        self._list_entry.bind("<Return>", self._apply_to_selected)
-
-        self._apply_btn = tk.Button(ml_edit, text="Apply",
-                                    font=("Arial", 10), bg="#cba6f7", fg="#1e1e2e",
-                                    relief="flat", padx=6, pady=2, cursor="hand2",
-                                    command=self._apply_to_selected)
-        self._apply_btn.pack(side=tk.LEFT, padx=4)
-
-        self._list_hint = tk.Label(ml_edit, text="← click a move to edit",
+        self._list_hint = tk.Label(ml_edit, text="← click a row to edit",
                                    font=("Arial", 9, "italic"), fg="#585b70", bg=self.BG)
-        self._list_hint.pack(side=tk.LEFT)
+        self._list_hint.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 2))
+
+        tk.Label(ml_edit, text="W:", font=("Courier", 11, "bold"),
+                 fg="#89b4fa", bg=self.BG).grid(row=1, column=0, sticky="e")
+        self._white_edit_var = tk.StringVar()
+        self._white_entry = tk.Entry(ml_edit, textvariable=self._white_edit_var,
+                                     font=("Courier", 11), width=8,
+                                     bg="#313244", fg="#89b4fa",
+                                     insertbackground=self.FG, relief="flat", bd=3)
+        self._white_entry.grid(row=1, column=1, padx=(4, 2))
+        self._white_entry.bind("<Return>", lambda e: self._apply_col(0))
+        tk.Button(ml_edit, text="Apply", font=("Arial", 9), bg="#89b4fa", fg="#1e1e2e",
+                  relief="flat", padx=4, cursor="hand2",
+                  command=lambda: self._apply_col(0)).grid(row=1, column=2, padx=(0, 8))
+
+        tk.Label(ml_edit, text="B:", font=("Courier", 11, "bold"),
+                 fg="#cba6f7", bg=self.BG).grid(row=1, column=3, sticky="e")
+        self._black_edit_var = tk.StringVar()
+        self._black_entry = tk.Entry(ml_edit, textvariable=self._black_edit_var,
+                                     font=("Courier", 11), width=8,
+                                     bg="#313244", fg="#cba6f7",
+                                     insertbackground=self.FG, relief="flat", bd=3)
+        self._black_entry.grid(row=1, column=4, padx=(4, 2))
+        self._black_entry.bind("<Return>", lambda e: self._apply_col(1))
+        tk.Button(ml_edit, text="Apply", font=("Arial", 9), bg="#cba6f7", fg="#1e1e2e",
+                  relief="flat", padx=4, cursor="hand2",
+                  command=lambda: self._apply_col(1)).grid(row=1, column=5, padx=(0, 4))
+
+        self._selected_pair = 0   # currently selected pair row (1-based; 0 = none)
 
         self._populate_move_list()
         self._refresh_board_view()
@@ -534,15 +547,25 @@ class CorrectionDialog:
     # ── Navigation helpers ────────────────────────────────────────────────────
 
     def _populate_move_list(self):
-        """One row per move: row index == history index."""
+        """Pair rows: row 0 = Start, row r = move pair r."""
         self._move_list.delete(0, tk.END)
-        self._move_list.insert(tk.END, "  Start")
-        for i, (_, _, san) in enumerate(self._history[1:], start=1):
-            num = (i + 1) // 2
-            dot = "." if i % 2 == 1 else "…"
-            # Mark the current illegal move distinctly
-            marker = " ◀ ?" if i - 1 == self._current_raw_idx else ""
-            self._move_list.insert(tk.END, f"  {num}{dot} {san}{marker}")
+        self._move_list.insert(tk.END, "  #    White    Black")
+        n_pairs = (len(self._history)) // 2 + (1 if len(self._history) % 2 == 0 else 0)
+        for r in range(1, (len(self._history) + 1) // 2 + 1):
+            w_idx = r * 2 - 1
+            b_idx = r * 2
+            white = self._history[w_idx][2] if w_idx < len(self._history) else ""
+            black = self._history[b_idx][2] if b_idx < len(self._history) else ""
+            # Mark the pair that contains the current illegal move
+            w_raw = w_idx - 1
+            b_raw = b_idx - 1
+            marker = " ?" if (w_raw == self._current_raw_idx or
+                               b_raw == self._current_raw_idx) else ""
+            self._move_list.insert(tk.END, f"  {r:<3}  {white:<8} {black}{marker}")
+
+    def _hist_idx_to_row(self, idx: int) -> int:
+        """Map history index to listbox row (pairs)."""
+        return max(0, (idx + 1) // 2)
 
     def _refresh_board_view(self):
         snap, last_move, san = self._history[self._view_idx]
@@ -557,9 +580,10 @@ class CorrectionDialog:
             label = f"{num}{dot} {san}"
         self._pos_label.configure(text=label)
 
+        row = self._hist_idx_to_row(self._view_idx)
         self._move_list.selection_clear(0, tk.END)
-        self._move_list.selection_set(self._view_idx)
-        self._move_list.see(self._view_idx)
+        self._move_list.selection_set(row)
+        self._move_list.see(row)
 
     def _go_prev(self):
         if self._view_idx > 0:
@@ -583,18 +607,24 @@ class CorrectionDialog:
         sel = self._move_list.curselection()
         if not sel:
             return
-        self._view_idx = sel[0]
+        row = sel[0]
+        self._selected_pair = row
+        # Navigate board to end of this pair
+        self._view_idx = min(row * 2, len(self._history) - 1)
         self._refresh_board_view()
-        # Populate the edit box with this move's SAN (not for "Start" row)
-        if self._view_idx > 0:
-            san = self._history[self._view_idx][2]
-            self._list_edit_var.set(san)
-            self._list_entry.focus_set()
-            self._list_entry.selection_range(0, tk.END)
-            self._list_hint.configure(text=f"editing move {self._view_idx}")
+        # Populate white/black edit fields
+        w_idx = row * 2 - 1
+        b_idx = row * 2
+        white = self._history[w_idx][2] if 0 < w_idx < len(self._history) else ""
+        black = self._history[b_idx][2] if 0 < b_idx < len(self._history) else ""
+        self._white_edit_var.set(white)
+        self._black_edit_var.set(black)
+        if row > 0:
+            self._list_hint.configure(text=f"editing pair {row}")
+            self._white_entry.focus_set()
+            self._white_entry.selection_range(0, tk.END)
         else:
-            self._list_edit_var.set("")
-            self._list_hint.configure(text="← click a move to edit")
+            self._list_hint.configure(text="← click a row to edit")
 
     # ── Zoom helpers ──────────────────────────────────────────────────────────
 
@@ -662,20 +692,25 @@ class CorrectionDialog:
             self._entry.configure(bg="#45232e")
             self._root.after(400, lambda: self._entry.configure(bg="#313244"))
 
-    def _apply_to_selected(self, _event=None):
-        """Apply the list-edit box value to whichever move is selected in the list."""
-        if self._view_idx == 0:
-            return   # can't edit "Start"
-        san = self._list_edit_var.get().strip()
-        # Validate against the board position *before* this move
-        board_before = self._history[self._view_idx - 1][0]
+    def _apply_col(self, col: int):
+        """Apply edit for white (col=0) or black (col=1) of the selected pair."""
+        if self._selected_pair == 0:
+            return
+        hist_idx = self._selected_pair * 2 - 1 + col   # white=2r-1, black=2r
+        if hist_idx >= len(self._history):
+            return
+        entry = self._white_entry if col == 0 else self._black_entry
+        var   = self._white_edit_var if col == 0 else self._black_edit_var
+        san   = var.get().strip()
+        board_before = self._history[hist_idx - 1][0]
         try:
             board_before.parse_san(san)
         except Exception:
-            self._list_entry.configure(bg="#45232e")
-            self._root.after(400, lambda: self._list_entry.configure(bg="#313244"))
+            entry.configure(bg="#45232e")
+            self._root.after(400, lambda: entry.configure(
+                bg="#313244" if col == 0 else "#313244"))
             return
-        raw_idx = self._view_idx - 1   # history index 1 → raw_moves[0]
+        raw_idx = hist_idx - 1
         self.result = (raw_idx, san)
         self._save_state()
         self._root.destroy()
