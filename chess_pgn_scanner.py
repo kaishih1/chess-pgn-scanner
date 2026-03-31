@@ -584,6 +584,11 @@ class CorrectionDialog:
                   relief="flat", padx=10, pady=4, cursor="hand2",
                   command=self._abort).pack(side=tk.RIGHT)
 
+        tk.Button(entry_frame, text="Save what we have so far",
+                  font=("Arial", 11), bg="#f9e2af", fg="#1e1e2e",
+                  relief="flat", padx=10, pady=4, cursor="hand2",
+                  command=self._save_so_far).pack(side=tk.RIGHT, padx=8)
+
     # ── Navigation helpers ────────────────────────────────────────────────────
 
     def _populate_move_list(self):
@@ -754,6 +759,21 @@ class CorrectionDialog:
         self.result = (raw_idx, san)
         self._save_state()
         self._root.destroy()
+
+    def _save_so_far(self):
+        """Open the final review dialog with all moves validated so far."""
+        game = chess.pgn.Game()
+        node = game
+        b    = chess.Board()
+        for _, move, _ in self._history[1:]:
+            node = node.add_variation(move)
+            b.push(move)
+        game.headers["Result"] = "*"
+        pgn = str(game)
+        self._save_state()
+        self._root.withdraw()
+        FinalReviewDialog(game=game, pgn=pgn, default_save_path=None)
+        self._root.deiconify()
 
     def _abort(self):
         self._save_state()
