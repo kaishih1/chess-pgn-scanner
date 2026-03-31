@@ -121,7 +121,12 @@ def extract_moves_from_image(image_path: str) -> list[str]:
         "2. For each move number, record White's move and Black's move from that row.\n"
         "3. Stop at the first completely blank row or a result (1-0 / 0-1 / ½-½).\n"
         "4. Common handwriting pitfalls: castling is O-O or O-O-O (not 0-0), "
-        "N = knight, B = bishop, x = capture, + = check, # = checkmate.\n\n"
+        "N = knight, B = bishop, + = check, # = checkmate.\n"
+        "5. CRITICAL — the capture symbol 'x': if you see an x-shaped mark between a piece/square "
+        "and a destination square, it is a capture and you MUST include the 'x' in the move "
+        "(e.g. 'Qxc3', 'Nxe5', 'exd4'). The 'x' is visually unmistakable — it crosses itself "
+        "and looks like no other letter. Never drop it or absorb it into an adjacent character. "
+        "A move written 'QxC3' must be returned as 'Qxc3', not 'Qc3' or 'Qc2'.\n\n"
         "Return a JSON object with:\n"
         '  "moves": an object where each key is the move number (as a string, e.g. "1", "2") '
         'and each value is {"white": "...", "black": "..."}. '
@@ -345,6 +350,20 @@ def suspicious_alternatives(board: chess.Board,
                              ocr_move: str) -> list[str]:
     """For a legal but possibly misread move, return better alternatives that
     also look more like the written notation.  Returns [] if the move seems fine."""
+
+    # Pure text check: 'x' in the notation means capture — if the accepted
+    # move is not a capture, it is almost certainly a misread.  No engine needed.
+    if 'x' in ocr_move.lower():
+        played_move = board.parse_san(played_san)
+        if not board.is_capture(played_move):
+            captures = sorted(
+                [board.san(m) for m in board.legal_moves if board.is_capture(m)],
+                key=lambda s: _ocr_similarity(s, ocr_move),
+                reverse=True,
+            )
+            if captures:
+                return captures[:4]
+
     candidates = _engine_candidates(board, num_moves=20, depth=12)
     if not candidates:
         return []
