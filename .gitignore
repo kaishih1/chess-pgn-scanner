@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+*.pyc
+*.heic
+*.HEIC
+*.jpg
+*.jpeg
+*.png
+*.pgn

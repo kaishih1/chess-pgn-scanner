@@ -1,0 +1,4 @@
+anthropic
+chess
+Pillow
+pillow-heif
