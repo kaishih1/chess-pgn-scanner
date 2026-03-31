@@ -289,11 +289,13 @@ class CorrectionDialog:
         self._root = root
         self._build(root)
 
-        # Centre on screen
+        # Maximize to full screen size
         root.update_idletasks()
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-        w, h   = root.winfo_width(), root.winfo_height()
-        root.geometry(f"+{(sw-w)//2}+{(sh-h)//2}")
+        root.geometry(f"{sw}x{sh}+0+0")
+
+        # After the window is drawn, fit the image to whatever space it actually has
+        root.after(100, self._fit_to_canvas)
 
         self._entry.focus_set()
         root.mainloop()
@@ -569,6 +571,17 @@ class CorrectionDialog:
             self._list_hint.configure(text="← click a move to edit")
 
     # ── Zoom helpers ──────────────────────────────────────────────────────────
+
+    def _fit_to_canvas(self):
+        """Set zoom so the image fills the canvas without overflowing."""
+        if self._orig_img is None:
+            return
+        cw = self._img_canvas.winfo_width()
+        ch = self._img_canvas.winfo_height()
+        if cw <= 1 or ch <= 1:
+            return
+        self._zoom = min(1.0, cw / self._orig_img.width, ch / self._orig_img.height)
+        self._render_image()
 
     def _render_image(self):
         if self._orig_img is None:
