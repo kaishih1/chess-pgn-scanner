@@ -251,6 +251,10 @@ class CorrectionDialog:
     BG = "#1e1e2e"
     FG = "#cdd6f4"
 
+    # Persisted across instances within one run
+    _last_geometry: str | None = None
+    _last_zoom: float | None = None
+
     def __init__(self, image_path: str, board: chess.Board,
                  move_label: str, ocr_move: str, suggestions: list[str],
                  current_raw_idx: int = 0):
@@ -262,7 +266,7 @@ class CorrectionDialog:
         self._ocr_move = ocr_move
         self._suggestions = suggestions
         self._current_raw_idx = current_raw_idx
-        self._zoom = 1.0
+        self._zoom = CorrectionDialog._last_zoom if CorrectionDialog._last_zoom is not None else 0.2
         self._orig_img: Image.Image | None = None
 
         # Build position history: list of (board_snapshot, last_move, san)
@@ -289,14 +293,17 @@ class CorrectionDialog:
         self._root = root
         self._build(root)
 
-        # Maximize to full screen size
         root.update_idletasks()
-        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-        root.geometry(f"{sw}x{sh}+0+0")
+        if CorrectionDialog._last_geometry:
+            root.geometry(CorrectionDialog._last_geometry)
+        else:
+            sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+            root.geometry(f"{sw}x{sh}+0+0")
 
-        # After the window is drawn, fit the image to whatever space it actually has
-        root.after(100, self._fit_to_canvas)
+        # Restore saved zoom or render at 20% for first time
+        root.after(100, self._render_image)
 
+        root.protocol("WM_DELETE_WINDOW", self._abort)
         self._entry.focus_set()
         root.mainloop()
 
@@ -503,8 +510,6 @@ class CorrectionDialog:
                   relief="flat", padx=10, pady=4, cursor="hand2",
                   command=self._abort).pack(side=tk.RIGHT)
 
-        self._root.protocol("WM_DELETE_WINDOW", self._abort)
-
     # ── Navigation helpers ────────────────────────────────────────────────────
 
     def _populate_move_list(self):
@@ -612,10 +617,15 @@ class CorrectionDialog:
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
 
+    def _save_state(self):
+        CorrectionDialog._last_geometry = self._root.geometry()
+        CorrectionDialog._last_zoom     = self._zoom
+
     def _pick(self, san: str):
         try:
             self._board.parse_san(san)
             self.result = (self._current_raw_idx, san)
+            self._save_state()
             self._root.destroy()
         except Exception:
             pass
@@ -625,6 +635,7 @@ class CorrectionDialog:
         try:
             self._board.parse_san(san)
             self.result = (self._current_raw_idx, san)
+            self._save_state()
             self._root.destroy()
         except Exception:
             self._entry.configure(bg="#45232e")
@@ -645,9 +656,11 @@ class CorrectionDialog:
             return
         raw_idx = self._view_idx - 1   # history index 1 → raw_moves[0]
         self.result = (raw_idx, san)
+        self._save_state()
         self._root.destroy()
 
     def _abort(self):
+        self._save_state()
         self.result = None
         self._root.destroy()
 
