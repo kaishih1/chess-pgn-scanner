@@ -107,24 +107,34 @@ def extract_moves_from_image(image_path: str) -> list[str]:
     image_data, media_type = encode_image(image_path)
 
     prompt = (
-        "This is a handwritten chess scoresheet. Please read it carefully and extract every move.\n\n"
+        "This is a handwritten chess scoresheet. Please read it carefully.\n\n"
+        "IMPORTANT — sheet layout: This is a US Chess tournament scoresheet. "
+        "It has THREE column groups side by side:\n"
+        "  • Left group:   moves  1-20  (WHITE column | BLACK column)\n"
+        "  • Middle group: moves 21-40  (WHITE column | BLACK column)\n"
+        "  • Right group:  moves 41-60  (WHITE column | BLACK column)\n\n"
+        "Each row has a PRINTED move number on its left edge. "
+        "These numbers are your anchor — use them to make sure you are reading the correct row. "
+        "Do not drift up or down a row. If the number printed says 15, that row is move 15.\n\n"
         "Instructions:\n"
-        "1. Scoresheets have numbered rows. Each row has a White move (left column) and a Black move (right column).\n"
-        "2. Read row by row, top to bottom. For each row, take White's move first, then Black's.\n"
-        "3. Stop when the moves end (blank rows, end of sheet, or a result like 1-0 / 0-1 / ½-½).\n"
-        "4. Do NOT skip rows or read the same row twice.\n"
-        "5. If a move is unclear, give your best guess at standard algebraic notation.\n"
-        "6. Common handwriting pitfalls: '0-0' means castling (write as 'O-O'), "
-        "'N' is knight not pawn, 'B' is bishop, 'x' means capture.\n\n"
-        "Return a JSON object with two keys:\n"
-        '  "moves": a flat array of moves in order, e.g. ["e4","e5","Nf3","Nc6"]\n'
-        '  "notes": any observations about the sheet (hard to read sections, possible errors, etc.)\n\n'
+        "1. Scan left-to-right across each column group. Read every printed move number you can see.\n"
+        "2. For each move number, record White's move and Black's move from that row.\n"
+        "3. Stop at the first completely blank row or a result (1-0 / 0-1 / ½-½).\n"
+        "4. Common handwriting pitfalls: castling is O-O or O-O-O (not 0-0), "
+        "N = knight, B = bishop, x = capture, + = check, # = checkmate.\n\n"
+        "Return a JSON object with:\n"
+        '  "moves": an object where each key is the move number (as a string, e.g. "1", "2") '
+        'and each value is {"white": "...", "black": "..."}. '
+        'Leave black empty string "" if Black had no move on that row (game ended on White\'s move).\n'
+        '  "notes": any observations (hard-to-read squares, uncertainty, etc.)\n\n'
+        "Example:\n"
+        '{"moves": {"1": {"white": "e4", "black": "e5"}, "2": {"white": "Nf3", "black": "Nc6"}}, "notes": ""}\n\n'
         "Return ONLY the JSON object — no other text."
     )
 
     message = client.messages.create(
         model="claude-opus-4-6",
-        max_tokens=1024,
+        max_tokens=2048,
         messages=[{
             "role": "user",
             "content": [
@@ -143,14 +153,15 @@ def extract_moves_from_image(image_path: str) -> list[str]:
 
     text = message.content[0].text.strip()
 
-    # Try parsing as the new {"moves": [...], "notes": "..."} format
     obj_match = re.search(r"\{.*\}", text, re.DOTALL)
     if obj_match:
         try:
             obj = json.loads(obj_match.group())
             if "notes" in obj and obj["notes"]:
                 print(f"  Claude notes: {obj['notes']}")
-            if "moves" in obj:
+            if "moves" in obj and isinstance(obj["moves"], dict):
+                return _numbered_dict_to_list(obj["moves"])
+            if "moves" in obj and isinstance(obj["moves"], list):
                 return [str(m).strip() for m in obj["moves"] if m]
         except json.JSONDecodeError:
             pass
@@ -166,6 +177,35 @@ def extract_moves_from_image(image_path: str) -> list[str]:
 
     print(f"Warning: could not parse Claude's response as JSON:\n{text}")
     return []
+
+
+def _numbered_dict_to_list(numbered: dict) -> list[str]:
+    """Convert {\"1\": {\"white\": \"e4\", \"black\": \"e5\"}, ...} to a flat list.
+    Warns about any gaps in the move numbering."""
+    if not numbered:
+        return []
+
+    try:
+        keys = sorted(numbered.keys(), key=lambda k: int(k))
+    except ValueError:
+        keys = sorted(numbered.keys())
+
+    result = []
+    prev = 0
+    for k in keys:
+        n = int(k)
+        if n != prev + 1:
+            print(f"  Warning: gap in move numbers — expected {prev+1}, got {n}")
+        prev = n
+        pair = numbered[k]
+        white = str(pair.get("white", "") or "").strip()
+        black = str(pair.get("black", "") or "").strip()
+        if white:
+            result.append(white)
+        if black:
+            result.append(black)
+
+    return result
 
 
 # ── OCR error correction ──────────────────────────────────────────────────────
