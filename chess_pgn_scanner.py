@@ -789,20 +789,36 @@ class PreflightDialog:
         inner.bind("<Configure>",
                    lambda e: ed_canvas.configure(scrollregion=ed_canvas.bbox("all")))
 
+        # Header row
+        hrow = tk.Frame(inner, bg=self.BG)
+        hrow.pack(fill=tk.X, pady=(2, 4), padx=4)
+        tk.Label(hrow, text="#",     font=("Courier", 10, "bold"), fg="#585b70", bg=self.BG, width=4, anchor="e").pack(side=tk.LEFT)
+        tk.Label(hrow, text="White", font=("Courier", 10, "bold"), fg="#89b4fa", bg=self.BG, width=10, anchor="w").pack(side=tk.LEFT, padx=(8, 0))
+        tk.Label(hrow, text="Black", font=("Courier", 10, "bold"), fg="#cba6f7", bg=self.BG, width=10, anchor="w").pack(side=tk.LEFT, padx=(12, 0))
+
         self._vars: list[tk.StringVar] = []
-        for i, move in enumerate(self._moves):
-            num    = i // 2 + 1
-            dot    = "." if i % 2 == 0 else "…"
-            color  = "#89b4fa" if i % 2 == 0 else "#cba6f7"
-            row    = tk.Frame(inner, bg=self.BG)
+        # Pad to even length so we can always iterate in pairs
+        padded = list(self._moves)
+        if len(padded) % 2 == 1:
+            padded.append("")
+        for pair in range(len(padded) // 2):
+            white_move = padded[pair * 2]
+            black_move = padded[pair * 2 + 1]
+            num = pair + 1
+            row = tk.Frame(inner, bg=self.BG)
             row.pack(fill=tk.X, pady=1, padx=4)
-            tk.Label(row, text=f"{num}{dot}", font=("Courier", 11),
-                     fg=color, bg=self.BG, width=5, anchor="e").pack(side=tk.LEFT)
-            var = tk.StringVar(value=move)
-            tk.Entry(row, textvariable=var, font=("Courier", 12),
-                     bg="#313244", fg=self.FG, insertbackground=self.FG,
-                     relief="flat", bd=3, width=10).pack(side=tk.LEFT, padx=4)
-            self._vars.append(var)
+            tk.Label(row, text=str(num), font=("Courier", 11),
+                     fg="#585b70", bg=self.BG, width=4, anchor="e").pack(side=tk.LEFT)
+            white_var = tk.StringVar(value=white_move)
+            tk.Entry(row, textvariable=white_var, font=("Courier", 12),
+                     bg="#313244", fg="#89b4fa", insertbackground=self.FG,
+                     relief="flat", bd=3, width=10).pack(side=tk.LEFT, padx=(8, 0))
+            black_var = tk.StringVar(value=black_move)
+            tk.Entry(row, textvariable=black_var, font=("Courier", 12),
+                     bg="#313244", fg="#cba6f7", insertbackground=self.FG,
+                     relief="flat", bd=3, width=10).pack(side=tk.LEFT, padx=(12, 0))
+            self._vars.append(white_var)
+            self._vars.append(black_var)
 
         ttk.Separator(root, orient="horizontal").pack(fill=tk.X, padx=10)
 
