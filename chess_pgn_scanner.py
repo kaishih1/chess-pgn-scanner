@@ -107,12 +107,19 @@ def extract_moves_from_image(image_path: str) -> list[str]:
     image_data, media_type = encode_image(image_path)
 
     prompt = (
-        "Please examine this chess scoresheet carefully.\n\n"
-        "Extract every chess move you can see, in order (White move, Black move, …).\n"
-        "Return ONLY a JSON array of moves in standard algebraic notation, e.g.:\n"
-        '["e4","e5","Nf3","Nc6","Bb5"]\n\n'
-        "Include both colours in sequence. If a move is unclear, give your best guess.\n"
-        "Do NOT include move numbers. Return ONLY the JSON array — no other text."
+        "This is a handwritten chess scoresheet. Please read it carefully and extract every move.\n\n"
+        "Instructions:\n"
+        "1. Scoresheets have numbered rows. Each row has a White move (left column) and a Black move (right column).\n"
+        "2. Read row by row, top to bottom. For each row, take White's move first, then Black's.\n"
+        "3. Stop when the moves end (blank rows, end of sheet, or a result like 1-0 / 0-1 / ½-½).\n"
+        "4. Do NOT skip rows or read the same row twice.\n"
+        "5. If a move is unclear, give your best guess at standard algebraic notation.\n"
+        "6. Common handwriting pitfalls: '0-0' means castling (write as 'O-O'), "
+        "'N' is knight not pawn, 'B' is bishop, 'x' means capture.\n\n"
+        "Return a JSON object with two keys:\n"
+        '  "moves": a flat array of moves in order, e.g. ["e4","e5","Nf3","Nc6"]\n'
+        '  "notes": any observations about the sheet (hard to read sections, possible errors, etc.)\n\n'
+        "Return ONLY the JSON object — no other text."
     )
 
     message = client.messages.create(
@@ -135,10 +142,24 @@ def extract_moves_from_image(image_path: str) -> list[str]:
     )
 
     text = message.content[0].text.strip()
-    match = re.search(r"\[.*?\]", text, re.DOTALL)
-    if match:
+
+    # Try parsing as the new {"moves": [...], "notes": "..."} format
+    obj_match = re.search(r"\{.*\}", text, re.DOTALL)
+    if obj_match:
         try:
-            moves = json.loads(match.group())
+            obj = json.loads(obj_match.group())
+            if "notes" in obj and obj["notes"]:
+                print(f"  Claude notes: {obj['notes']}")
+            if "moves" in obj:
+                return [str(m).strip() for m in obj["moves"] if m]
+        except json.JSONDecodeError:
+            pass
+
+    # Fall back to a bare array
+    arr_match = re.search(r"\[.*?\]", text, re.DOTALL)
+    if arr_match:
+        try:
+            moves = json.loads(arr_match.group())
             return [str(m).strip() for m in moves if m]
         except json.JSONDecodeError:
             pass
@@ -665,6 +686,185 @@ class CorrectionDialog:
         self._root.destroy()
 
 
+# ── Pre-flight review dialog ──────────────────────────────────────────────────
+
+class PreflightDialog:
+    """
+    Shows Claude's raw extracted moves alongside the scoresheet image
+    so the user can fix obvious misreads before validation begins.
+    Each move is shown as an editable row (one per line).
+    """
+
+    BG = "#1e1e2e"
+    FG = "#cdd6f4"
+
+    def __init__(self, image_path: str, moves: list[str]):
+        self._image_path = image_path
+        self.result: list[str] | None = None  # None = abort
+        self._moves = list(moves)
+        self._run()
+
+    def _run(self):
+        root = tk.Tk()
+        root.title("Review Extracted Moves")
+        root.configure(bg=self.BG)
+        root.resizable(True, True)
+        self._root = root
+        self._build(root)
+
+        root.update_idletasks()
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.geometry(f"{sw}x{sh}+0+0")
+        root.after(100, self._fit_to_canvas)
+        root.mainloop()
+
+    def _build(self, root):
+        pad = dict(padx=10, pady=6)
+
+        hdr = tk.Frame(root, bg=self.BG)
+        hdr.pack(fill=tk.X, **pad)
+        tk.Label(hdr, text="Review extracted moves before validation",
+                 font=("Arial", 14, "bold"), fg="#cba6f7", bg=self.BG).pack(anchor="w")
+        tk.Label(hdr, text="Edit any move that looks wrong, then click Validate.",
+                 font=("Arial", 11), fg="#a6adc8", bg=self.BG).pack(anchor="w")
+
+        ttk.Separator(root, orient="horizontal").pack(fill=tk.X, padx=10)
+
+        main = tk.Frame(root, bg=self.BG)
+        main.pack(fill=tk.BOTH, expand=True, **pad)
+
+        # — Scoresheet image —
+        img_lf = tk.LabelFrame(main, text=" Scoresheet ",
+                               font=("Arial", 10, "bold"),
+                               fg=self.FG, bg=self.BG, bd=1, relief="groove")
+        img_lf.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
+
+        try:
+            self._orig_img = Image.open(self._image_path).convert("RGB")
+            CANVAS_W, CANVAS_H = 500, 600
+            img_canvas = tk.Canvas(img_lf, width=CANVAS_W, height=CANVAS_H,
+                                   bg=self.BG, highlightthickness=0)
+            vsb = tk.Scrollbar(img_lf, orient="vertical",   command=img_canvas.yview)
+            hsb = tk.Scrollbar(img_lf, orient="horizontal", command=img_canvas.xview)
+            img_canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+            vsb.pack(side=tk.RIGHT,  fill=tk.Y)
+            hsb.pack(side=tk.BOTTOM, fill=tk.X)
+            img_canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+            self._img_canvas = img_canvas
+
+            zoom_bar = tk.Frame(img_lf, bg=self.BG)
+            zoom_bar.pack(fill=tk.X, padx=4, pady=(0, 4))
+            tk.Button(zoom_bar, text="−", font=("Arial", 13, "bold"),
+                      bg="#45475a", fg=self.FG, relief="flat", width=3,
+                      cursor="hand2", command=self._zoom_out).pack(side=tk.LEFT)
+            tk.Button(zoom_bar, text="+", font=("Arial", 13, "bold"),
+                      bg="#45475a", fg=self.FG, relief="flat", width=3,
+                      cursor="hand2", command=self._zoom_in).pack(side=tk.LEFT, padx=4)
+            self._zoom_label = tk.Label(zoom_bar, text="",
+                                        font=("Arial", 10), fg="#a6adc8", bg=self.BG)
+            self._zoom_label.pack(side=tk.LEFT)
+            self._zoom = 0.2
+            img_canvas.bind("<MouseWheel>", self._on_mousewheel)
+            img_canvas.bind("<Button-4>",   self._on_mousewheel)
+            img_canvas.bind("<Button-5>",   self._on_mousewheel)
+        except Exception as exc:
+            tk.Label(img_lf, text=f"(Could not load image)\n{exc}",
+                     fg="#f38ba8", bg=self.BG, wraplength=200).pack(padx=8, pady=8)
+
+        # — Move editor —
+        ed_lf = tk.LabelFrame(main, text=" Extracted Moves (edit as needed) ",
+                               font=("Arial", 10, "bold"),
+                               fg=self.FG, bg=self.BG, bd=1, relief="groove")
+        ed_lf.pack(side=tk.LEFT, fill=tk.BOTH)
+
+        # Scrollable frame of entry widgets
+        ed_canvas = tk.Canvas(ed_lf, bg=self.BG, highlightthickness=0, width=200)
+        ed_scroll = tk.Scrollbar(ed_lf, orient="vertical", command=ed_canvas.yview)
+        ed_canvas.configure(yscrollcommand=ed_scroll.set)
+        ed_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        ed_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        inner = tk.Frame(ed_canvas, bg=self.BG)
+        ed_canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>",
+                   lambda e: ed_canvas.configure(scrollregion=ed_canvas.bbox("all")))
+
+        self._vars: list[tk.StringVar] = []
+        for i, move in enumerate(self._moves):
+            num    = i // 2 + 1
+            dot    = "." if i % 2 == 0 else "…"
+            color  = "#89b4fa" if i % 2 == 0 else "#cba6f7"
+            row    = tk.Frame(inner, bg=self.BG)
+            row.pack(fill=tk.X, pady=1, padx=4)
+            tk.Label(row, text=f"{num}{dot}", font=("Courier", 11),
+                     fg=color, bg=self.BG, width=5, anchor="e").pack(side=tk.LEFT)
+            var = tk.StringVar(value=move)
+            tk.Entry(row, textvariable=var, font=("Courier", 12),
+                     bg="#313244", fg=self.FG, insertbackground=self.FG,
+                     relief="flat", bd=3, width=10).pack(side=tk.LEFT, padx=4)
+            self._vars.append(var)
+
+        ttk.Separator(root, orient="horizontal").pack(fill=tk.X, padx=10)
+
+        bot = tk.Frame(root, bg=self.BG)
+        bot.pack(fill=tk.X, **pad)
+        tk.Button(bot, text="Validate →",
+                  font=("Arial", 12, "bold"), bg="#a6e3a1", fg="#1e1e2e",
+                  relief="flat", padx=16, pady=6, cursor="hand2",
+                  command=self._confirm).pack(side=tk.LEFT)
+        tk.Button(bot, text="Abort",
+                  font=("Arial", 11), bg="#f38ba8", fg="#1e1e2e",
+                  relief="flat", padx=12, pady=6, cursor="hand2",
+                  command=self._abort).pack(side=tk.RIGHT)
+        tk.Label(bot,
+                 text="Tip: blank out a move to remove it (e.g. if Claude added a phantom move)",
+                 font=("Arial", 9, "italic"), fg="#585b70", bg=self.BG).pack(side=tk.LEFT, padx=14)
+
+        root.protocol("WM_DELETE_WINDOW", self._abort)
+
+    def _fit_to_canvas(self):
+        if not hasattr(self, "_orig_img"):
+            return
+        cw = self._img_canvas.winfo_width()
+        ch = self._img_canvas.winfo_height()
+        if cw <= 1 or ch <= 1:
+            return
+        self._zoom = min(1.0, cw / self._orig_img.width, ch / self._orig_img.height)
+        self._render_image()
+
+    def _render_image(self):
+        w = int(self._orig_img.width  * self._zoom)
+        h = int(self._orig_img.height * self._zoom)
+        resized = self._orig_img.resize((w, h), Image.LANCZOS)
+        self._photo = ImageTk.PhotoImage(resized)
+        self._img_canvas.delete("all")
+        self._img_canvas.create_image(0, 0, anchor="nw", image=self._photo)
+        self._img_canvas.configure(scrollregion=(0, 0, w, h))
+        self._zoom_label.configure(text=f"{int(self._zoom * 100)}%")
+
+    def _zoom_in(self):
+        self._zoom = min(self._zoom * 1.25, 5.0)
+        self._render_image()
+
+    def _zoom_out(self):
+        self._zoom = max(self._zoom / 1.25, 0.1)
+        self._render_image()
+
+    def _on_mousewheel(self, event):
+        if event.num == 4 or event.delta > 0:
+            self._zoom_in()
+        else:
+            self._zoom_out()
+
+    def _confirm(self):
+        self.result = [v.get().strip() for v in self._vars if v.get().strip()]
+        self._root.destroy()
+
+    def _abort(self):
+        self.result = None
+        self._root.destroy()
+
+
 # ── Final review dialog ───────────────────────────────────────────────────────
 
 class FinalReviewDialog:
@@ -914,6 +1114,15 @@ def process_scoresheet(image_path: str, output_path: str | None = None) -> str |
         return None
 
     print(f"Claude extracted {len(raw_moves)} moves: {raw_moves}\n")
+
+    # Pre-flight: let the user fix obvious misreads before validation
+    print("Opening pre-flight review…")
+    preflight = PreflightDialog(image_path=image_path, moves=raw_moves)
+    if preflight.result is None:
+        print("Aborted at pre-flight review.")
+        return None
+    raw_moves = preflight.result
+    print(f"After pre-flight review: {len(raw_moves)} moves: {raw_moves}\n")
 
     raw_moves = list(raw_moves)   # make mutable for backtrack edits
     confirmed_sans: list[str] = []
