@@ -343,6 +343,176 @@ def suggest_moves(board: chess.Board, ocr_move: str, n: int = 6) -> list[str]:
     return result
 
 
+# ── Shared Tk root ────────────────────────────────────────────────────────────
+# One Tk() root lives for the whole run; all dialogs are Toplevels on top of it.
+
+_tk_root: tk.Tk | None = None
+
+def _get_root() -> tk.Tk:
+    global _tk_root
+    if _tk_root is None:
+        _tk_root = tk.Tk()
+        _tk_root.withdraw()
+    return _tk_root
+
+
+# ── Progress window ────────────────────────────────────────────────────────────
+
+class ProgressWindow:
+    """
+    Persistent window that shows moves and PGN updating in real time
+    as each move is validated.
+    """
+
+    BG = "#1e1e2e"
+    FG = "#cdd6f4"
+
+    def __init__(self):
+        root = _get_root()
+        root.deiconify()
+        root.title("Chess PGN Scanner")
+        root.configure(bg=self.BG)
+        root.resizable(True, True)
+        self._confirmed: list[tuple[int, str]] = []   # (move_idx, san)
+        self._last_move: chess.Move | None = None
+        self._board = chess.Board()
+        self._build(root)
+        root.update_idletasks()
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.geometry(f"{min(sw, 1100)}x{min(sh, 700)}+{(sw-1100)//2}+{(sh-700)//2}")
+        root.update()
+
+    def _build(self, root):
+        pad = dict(padx=10, pady=6)
+
+        self._status = tk.Label(root,
+                                text="Sending image to Claude…",
+                                font=("Arial", 12, "bold"),
+                                fg="#cba6f7", bg=self.BG, anchor="w")
+        self._status.pack(fill=tk.X, padx=12, pady=(8, 2))
+
+        ttk.Separator(root, orient="horizontal").pack(fill=tk.X, padx=10)
+
+        main = tk.Frame(root, bg=self.BG)
+        main.pack(fill=tk.BOTH, expand=True, **pad)
+
+        # — Board —
+        board_lf = tk.LabelFrame(main, text=" Position ",
+                                  font=("Arial", 10, "bold"),
+                                  fg=self.FG, bg=self.BG, bd=1, relief="groove")
+        board_lf.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+        self._board_canvas = BoardCanvas(board_lf, self._board, bg=self.BG)
+        self._board_canvas.pack(padx=6, pady=6)
+
+        # — Move list —
+        ml_lf = tk.LabelFrame(main, text=" Moves ",
+                               font=("Arial", 10, "bold"),
+                               fg=self.FG, bg=self.BG, bd=1, relief="groove")
+        ml_lf.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+        ml_scroll = tk.Scrollbar(ml_lf, orient="vertical")
+        self._move_list = tk.Listbox(ml_lf, font=("Courier", 11),
+                                     bg="#181825", fg=self.FG,
+                                     selectbackground="#585b70",
+                                     activestyle="none",
+                                     width=22, height=18,
+                                     yscrollcommand=ml_scroll.set)
+        ml_scroll.config(command=self._move_list.yview)
+        ml_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._move_list.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self._move_list.insert(tk.END, f"  {'#':<4} {'White':<9} Black")
+
+        # — PGN —
+        pgn_lf = tk.LabelFrame(main, text=" PGN ",
+                                font=("Arial", 10, "bold"),
+                                fg=self.FG, bg=self.BG, bd=1, relief="groove")
+        pgn_lf.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        pgn_scroll = tk.Scrollbar(pgn_lf, orient="vertical")
+        self._pgn_text = tk.Text(pgn_lf, font=("Courier", 10),
+                                  bg="#181825", fg=self.FG,
+                                  wrap=tk.WORD, state=tk.DISABLED,
+                                  yscrollcommand=pgn_scroll.set)
+        pgn_scroll.config(command=self._pgn_text.yview)
+        pgn_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._pgn_text.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+    def set_status(self, text: str):
+        self._status.configure(text=text)
+        _tk_root.update()
+
+    def add_move(self, board: chess.Board, san: str, move: chess.Move):
+        self._confirmed.append((len(self._confirmed), san))
+        self._last_move = move
+        self._board = board
+
+        # Update board
+        self._board_canvas.board = board
+        self._board_canvas.redraw(move)
+
+        # Refresh move list (rebuild pairs)
+        self._move_list.delete(1, tk.END)
+        for r in range((len(self._confirmed) + 1) // 2):
+            w = self._confirmed[r * 2][1] if r * 2 < len(self._confirmed) else ""
+            b = self._confirmed[r * 2 + 1][1] if r * 2 + 1 < len(self._confirmed) else ""
+            self._move_list.insert(tk.END, f"  {r+1:<4} {w:<9} {b}")
+        self._move_list.see(tk.END)
+
+        # Rebuild and display PGN
+        game = chess.pgn.Game()
+        node = game
+        b    = chess.Board()
+        for _, s in self._confirmed:
+            m = b.parse_san(s)
+            b.push(m)
+            node = node.add_variation(m)
+        game.headers["Result"] = "*"
+        pgn = str(game)
+        self._pgn_text.configure(state=tk.NORMAL)
+        self._pgn_text.delete("1.0", tk.END)
+        self._pgn_text.insert("1.0", pgn)
+        self._pgn_text.configure(state=tk.DISABLED)
+        self._pgn_text.see(tk.END)
+
+        _tk_root.update()
+
+    def reset_to(self, confirmed_sans: list[str]):
+        """Rebuild display after a backtrack — truncate to the given confirmed moves."""
+        self._confirmed = [(i, s) for i, s in enumerate(confirmed_sans)]
+        b = chess.Board()
+        last_move: chess.Move | None = None
+        for s in confirmed_sans:
+            m = b.parse_san(s)
+            b.push(m)
+            last_move = m
+        self._board = b
+        self._last_move = last_move
+
+        self._board_canvas.board = b
+        self._board_canvas.redraw(last_move)
+
+        self._move_list.delete(1, tk.END)
+        for r in range((len(self._confirmed) + 1) // 2):
+            w   = self._confirmed[r * 2][1]     if r * 2     < len(self._confirmed) else ""
+            bl  = self._confirmed[r * 2 + 1][1] if r * 2 + 1 < len(self._confirmed) else ""
+            self._move_list.insert(tk.END, f"  {r+1:<4} {w:<9} {bl}")
+        self._move_list.see(tk.END)
+
+        game = chess.pgn.Game()
+        node = game
+        b2   = chess.Board()
+        for _, s in self._confirmed:
+            m = b2.parse_san(s)
+            b2.push(m)
+            node = node.add_variation(m)
+        game.headers["Result"] = "*"
+        pgn = str(game)
+        self._pgn_text.configure(state=tk.NORMAL)
+        self._pgn_text.delete("1.0", tk.END)
+        self._pgn_text.insert("1.0", pgn)
+        self._pgn_text.configure(state=tk.DISABLED)
+
+        _tk_root.update()
+
+
 # ── Suspicion check ───────────────────────────────────────────────────────────
 
 def suspicious_alternatives(board: chess.Board,
@@ -465,10 +635,11 @@ class SuspicionDialog:
         self._run()
 
     def _run(self):
-        root = tk.Tk()
+        root = tk.Toplevel(_get_root())
         root.title("Suspicious move — please confirm")
         root.configure(bg=self.BG)
         root.resizable(False, False)
+        root.grab_set()
         self._root = root
         self._build(root)
 
@@ -476,7 +647,7 @@ class SuspicionDialog:
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
         w, h   = root.winfo_width(), root.winfo_height()
         root.geometry(f"+{(sw-w)//2}+{(sh-h)//2}")
-        root.mainloop()
+        root.wait_window()
 
     def _build(self, root):
         pad = dict(padx=14, pady=8)
@@ -577,10 +748,11 @@ class CorrectionDialog:
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _run(self):
-        root = tk.Tk()
+        root = tk.Toplevel(_get_root())
         root.title("Move Correction")
         root.configure(bg=self.BG)
         root.resizable(True, True)
+        root.grab_set()
 
         self._root = root
         self._build(root)
@@ -592,12 +764,10 @@ class CorrectionDialog:
             sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
             root.geometry(f"{sw}x{sh}+0+0")
 
-        # Restore saved zoom or render at 20% for first time
         root.after(100, self._render_image)
-
         root.protocol("WM_DELETE_WINDOW", self._abort)
         self._entry.focus_set()
-        root.mainloop()
+        root.wait_window()
 
     def _build(self, root):
         pad = dict(padx=10, pady=6)
@@ -1045,10 +1215,11 @@ class FinalReviewDialog:
         self._run()
 
     def _run(self):
-        root = tk.Tk()
+        root = tk.Toplevel(_get_root())
         root.title("Game Review")
         root.configure(bg=self.BG)
         root.resizable(True, True)
+        root.grab_set()
         self._root = root
         self._build(root)
 
@@ -1056,7 +1227,7 @@ class FinalReviewDialog:
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
         w, h   = root.winfo_width(), root.winfo_height()
         root.geometry(f"+{(sw-w)//2}+{(sh-h)//2}")
-        root.mainloop()
+        root.wait_window()
 
     def _build(self, root):
         pad = dict(padx=10, pady=6)
@@ -1253,15 +1424,22 @@ def process_scoresheet(image_path: str, output_path: str | None = None) -> str |
     """
     print(f"\nProcessing: {image_path}")
     print("─" * 50)
+
+    _get_root()
+    progress = ProgressWindow()
+    progress.set_status("Sending image to Claude for move extraction…")
     print("Sending image to Claude for move extraction…")
 
     raw_moves = extract_moves_from_image(image_path)
 
     if not raw_moves:
+        progress.set_status("ERROR: No moves could be extracted from the image.")
         print("ERROR: No moves could be extracted from the image.")
+        _tk_root.destroy()
         return None
 
     print(f"Claude extracted {len(raw_moves)} moves: {raw_moves}\n")
+    progress.set_status(f"Validating {len(raw_moves)} half-moves…")
 
     raw_moves = list(raw_moves)   # make mutable for backtrack edits
     confirmed_sans: list[str] = []
@@ -1274,6 +1452,8 @@ def process_scoresheet(image_path: str, output_path: str | None = None) -> str |
         num       = idx // 2 + 1
         dot       = "." if idx % 2 == 0 else "…"
         label     = f"{num}{dot} ({color_str})"
+
+        progress.set_status(f'Validating {label}  "{raw}"…')
 
         # Rebuild board to current position
         board = chess.Board()
@@ -1323,6 +1503,7 @@ def process_scoresheet(image_path: str, output_path: str | None = None) -> str |
                 raw_moves[corrected_idx] = corrected_san
                 confirmed_sans = confirmed_sans[:corrected_idx]
                 idx = corrected_idx
+                progress.reset_to(confirmed_sans)
                 continue
 
             raw = corrected_san
@@ -1349,6 +1530,7 @@ def process_scoresheet(image_path: str, output_path: str | None = None) -> str |
 
         board.push(parsed)
         confirmed_sans.append(san)
+        progress.add_move(board, san, parsed)
         print(f"  OK  {label}  {san}")
         idx += 1
 
@@ -1375,8 +1557,12 @@ def process_scoresheet(image_path: str, output_path: str | None = None) -> str |
 
     print(f"\n{'─'*50}\nFinal PGN:\n{pgn}")
 
+    n = len(confirmed_sans)
+    progress.set_status(f"Done — {n} moves validated.  Opening final review…")
+
     FinalReviewDialog(game=game, pgn=pgn, default_save_path=output_path)
 
+    _tk_root.destroy()
     return pgn
 
 
