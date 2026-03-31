@@ -234,6 +234,10 @@ import shutil
 # plausible for a human. Beyond it the prior drops off exponentially.
 _ENGINE_TEMP_CP = 150
 
+# If an accepted legal move is this many cp below best AND a better-matching
+# alternative exists, flag it as a likely misread.
+_SUSPICION_THRESHOLD_CP = 300
+
 def _find_stockfish() -> str | None:
     return shutil.which("stockfish")
 
@@ -334,6 +338,39 @@ def suggest_moves(board: chess.Board, ocr_move: str, n: int = 6) -> list[str]:
     return result
 
 
+# ── Suspicion check ───────────────────────────────────────────────────────────
+
+def suspicious_alternatives(board: chess.Board,
+                             played_san: str,
+                             ocr_move: str) -> list[str]:
+    """For a legal but possibly misread move, return better alternatives that
+    also look more like the written notation.  Returns [] if the move seems fine."""
+    candidates = _engine_candidates(board, num_moves=20, depth=12)
+    if not candidates:
+        return []
+
+    best_cp = candidates[0][1]
+    played_cp = next((cp for san, cp in candidates if san == played_san),
+                     best_cp - 9999)
+
+    # Move is within acceptable range — no suspicion
+    if best_cp - played_cp < _SUSPICION_THRESHOLD_CP:
+        return []
+
+    played_sim = _ocr_similarity(played_san, ocr_move)
+
+    alts = []
+    for san, cp in candidates:
+        if san == played_san:
+            continue
+        if best_cp - cp >= _SUSPICION_THRESHOLD_CP:
+            continue          # this alternative is also bad chess
+        if _ocr_similarity(san, ocr_move) > played_sim:
+            alts.append(san)  # looks more like the notation AND is better chess
+
+    return alts[:4]
+
+
 # ── Board canvas widget ───────────────────────────────────────────────────────
 
 class BoardCanvas(tk.Canvas):
@@ -385,6 +422,95 @@ class BoardCanvas(tk.Canvas):
                              text="abcdefgh"[i], font=("Arial", 8), fill="#888")
             self.create_text(4, (7-i)*ss + ss//2,
                              text=str(i+1), font=("Arial", 8), fill="#888")
+
+
+# ── Suspicion dialog ──────────────────────────────────────────────────────────
+
+class SuspicionDialog:
+    """
+    Lightweight prompt shown when a legal move looks like it might be a misread:
+    the engine considers it bad AND a better-matching alternative exists.
+    """
+
+    BG = "#1e1e2e"
+    FG = "#cdd6f4"
+
+    def __init__(self, board: chess.Board, played_san: str,
+                 ocr_move: str, alternatives: list[str]):
+        # result: the confirmed SAN (either played_san kept, or an alternative)
+        self.result: str = played_san
+        self._board      = board.copy()
+        self._played_san = played_san
+        self._ocr_move   = ocr_move
+        self._alts       = alternatives
+        self._run()
+
+    def _run(self):
+        root = tk.Tk()
+        root.title("Suspicious move — please confirm")
+        root.configure(bg=self.BG)
+        root.resizable(False, False)
+        self._root = root
+        self._build(root)
+
+        root.update_idletasks()
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        w, h   = root.winfo_width(), root.winfo_height()
+        root.geometry(f"+{(sw-w)//2}+{(sh-h)//2}")
+        root.mainloop()
+
+    def _build(self, root):
+        pad = dict(padx=14, pady=8)
+
+        # Header
+        hdr = tk.Frame(root, bg=self.BG)
+        hdr.pack(fill=tk.X, **pad)
+        tk.Label(hdr,
+                 text="Suspicious move — engine thinks this may be a misread",
+                 font=("Arial", 13, "bold"), fg="#f9e2af", bg=self.BG).pack(anchor="w")
+        tk.Label(hdr,
+                 text=f'OCR read: "{self._ocr_move}"   →   accepted as: "{self._played_san}"',
+                 font=("Arial", 11), fg="#a6adc8", bg=self.BG).pack(anchor="w", pady=(4, 0))
+
+        ttk.Separator(root, orient="horizontal").pack(fill=tk.X, padx=14)
+
+        # Board + buttons side by side
+        mid = tk.Frame(root, bg=self.BG)
+        mid.pack(fill=tk.BOTH, **pad)
+
+        BoardCanvas(mid, self._board, bg=self.BG).pack(side=tk.LEFT, padx=(0, 16))
+
+        btn_col = tk.Frame(mid, bg=self.BG)
+        btn_col.pack(side=tk.LEFT, anchor="n")
+
+        tk.Label(btn_col, text="Keep the accepted move:",
+                 font=("Arial", 10, "italic"), fg="#a6adc8", bg=self.BG).pack(anchor="w")
+        tk.Button(btn_col, text=self._played_san,
+                  font=("Arial", 13, "bold"), bg="#45475a", fg=self.FG,
+                  relief="flat", padx=14, pady=6, width=10, cursor="hand2",
+                  command=lambda: self._choose(self._played_san)).pack(pady=(2, 12))
+
+        tk.Label(btn_col, text="Or use one of these instead:",
+                 font=("Arial", 10, "italic"), fg="#a6adc8", bg=self.BG).pack(anchor="w")
+        for san in self._alts:
+            tk.Button(btn_col, text=san,
+                      font=("Arial", 13, "bold"), bg="#cba6f7", fg="#1e1e2e",
+                      relief="flat", padx=14, pady=6, width=10, cursor="hand2",
+                      command=lambda s=san: self._choose(s)).pack(pady=2)
+
+        ttk.Separator(root, orient="horizontal").pack(fill=tk.X, padx=14)
+
+        bot = tk.Frame(root, bg=self.BG)
+        bot.pack(fill=tk.X, **pad)
+        tk.Label(bot, text="Position shown is BEFORE this move.",
+                 font=("Arial", 9, "italic"), fg="#585b70", bg=self.BG).pack(side=tk.LEFT)
+
+        root.bind("<Return>", lambda _: self._choose(self._played_san))
+        root.protocol("WM_DELETE_WINDOW", lambda: self._choose(self._played_san))
+
+    def _choose(self, san: str):
+        self.result = san
+        self._root.destroy()
 
 
 # ── Correction dialog ─────────────────────────────────────────────────────────
@@ -1191,6 +1317,17 @@ def process_scoresheet(image_path: str, output_path: str | None = None) -> str |
                 break
 
         san = board.san(parsed)
+
+        # ── Suspicion check on legal moves ───────────────────────────────────
+        alts = suspicious_alternatives(board, san, raw)
+        if alts:
+            print(f"  ?? Suspicious  {label}  '{san}' (OCR: '{raw}') — alternatives: {alts}")
+            dlg = SuspicionDialog(board, san, raw, alts)
+            if dlg.result != san:
+                print(f"  Corrected suspicious move: '{san}' → '{dlg.result}'")
+                san    = dlg.result
+                parsed = board.parse_san(san)
+
         board.push(parsed)
         confirmed_sans.append(san)
         print(f"  OK  {label}  {san}")
