@@ -2,3 +2,5 @@ anthropic
 chess
 Pillow
 pillow-heif
+# Stockfish engine (optional but strongly recommended for move suggestions):
+#   brew install stockfish

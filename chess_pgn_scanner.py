@@ -225,27 +225,113 @@ def fix_ocr_errors(move: str) -> str:
     return result
 
 
+# ── Engine integration ────────────────────────────────────────────────────────
+
+import math
+import shutil
+
+# Centipawn "temperature": moves within this many cp of best are roughly equally
+# plausible for a human. Beyond it the prior drops off exponentially.
+_ENGINE_TEMP_CP = 150
+
+def _find_stockfish() -> str | None:
+    return shutil.which("stockfish")
+
+def _engine_candidates(board: chess.Board,
+                       num_moves: int = 20,
+                       depth: int = 14) -> list[tuple[str, int]]:
+    """Return [(san, centipawns_relative), ...] best-first using Stockfish.
+    Returns [] if Stockfish is not installed."""
+    sf = _find_stockfish()
+    if not sf:
+        return []
+    try:
+        with chess.engine.SimpleEngine.popen_uci(sf) as engine:
+            infos = engine.analyse(
+                board,
+                chess.engine.Limit(depth=depth),
+                multipv=num_moves,
+            )
+        results = []
+        for info in infos:
+            if "score" not in info or "pv" not in info or not info["pv"]:
+                continue
+            move  = info["pv"][0]
+            san   = board.san(move)
+            score = info["score"].relative
+            cp    = score.score(mate_score=10000)
+            results.append((san, cp))
+        return results   # already sorted best → worst by Stockfish
+    except Exception as exc:
+        print(f"  Engine error (falling back to OCR-only ranking): {exc}")
+        return []
+
+
 # ── Move suggestion ───────────────────────────────────────────────────────────
 
-def suggest_similar_moves(board: chess.Board, ocr_move: str, n: int = 6) -> list[str]:
-    """Return up to n legal moves most similar to the OCR'd text."""
-    legal_sans = [board.san(m) for m in board.legal_moves]
+def _ocr_similarity(san: str, ocr_move: str) -> float:
+    """Heuristic similarity between a SAN string and the OCR'd text (0..1 range)."""
+    if not ocr_move:
+        return 0.0
+    ol, sl = ocr_move.lower(), san.lower()
+    s  = sum(1 for c in ol if c in sl) * 2
+    s -= abs(len(san) - len(ocr_move))
+    if len(ocr_move) >= 2 and ocr_move[-2:].lower() in sl:
+        s += 5
+    if ocr_move and ocr_move[0].isupper() and san and san[0] == ocr_move[0]:
+        s += 4
+    # Normalise to a rough 0-1 range (won't exceed ~1 for a 6-char move)
+    return max(0.0, s / max(len(ocr_move) * 3, 1))
 
-    def score(san: str) -> int:
-        s = 0
-        ol, sl = ocr_move.lower(), san.lower()
-        s += sum(1 for c in ol if c in sl) * 2
-        s -= abs(len(san) - len(ocr_move))
-        # Same destination square (last two chars)?
-        if len(ocr_move) >= 2 and ocr_move[-2:].lower() in sl:
-            s += 5
-        # Same piece letter?
-        if ocr_move and ocr_move[0].isupper() and san and san[0] == ocr_move[0]:
-            s += 4
-        return s
 
-    ranked = sorted(legal_sans, key=score, reverse=True)
-    return ranked[:n]
+def suggest_moves(board: chess.Board, ocr_move: str, n: int = 6) -> list[str]:
+    """Rank candidate moves by OCR similarity × engine prior.
+
+    The engine prior uses a softmax over centipawn scores so that moves within
+    ~150 cp of best (reasonable human moves) score well, while moves that are
+    clearly bad score close to zero.  Falls back to OCR-only if Stockfish is
+    not available.
+    """
+    candidates = _engine_candidates(board)
+
+    if not candidates:
+        # No engine — fall back to pure OCR similarity over all legal moves
+        legal_sans = [board.san(m) for m in board.legal_moves]
+        ranked = sorted(legal_sans, key=lambda s: _ocr_similarity(s, ocr_move), reverse=True)
+        return ranked[:n]
+
+    best_cp = candidates[0][1]
+
+    def combined(san: str, cp: int) -> float:
+        ocr   = _ocr_similarity(san, ocr_move)
+        diff  = max(0, best_cp - cp)            # how many cp worse than best
+        prior = math.exp(-diff / _ENGINE_TEMP_CP)
+        return ocr * prior
+
+    ranked = sorted(candidates, key=lambda x: combined(x[0], x[1]), reverse=True)
+
+    # If the OCR'd move itself didn't make the engine's top-N list, still
+    # consider all legal moves so we don't miss the obvious read.
+    engine_sans = {s for s, _ in candidates}
+    extras = [
+        board.san(m) for m in board.legal_moves
+        if board.san(m) not in engine_sans
+    ]
+    extra_ranked = sorted(extras,
+                          key=lambda s: _ocr_similarity(s, ocr_move),
+                          reverse=True)
+
+    combined_list = [s for s, _ in ranked] + extra_ranked
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    result = []
+    for s in combined_list:
+        if s not in seen:
+            seen.add(s)
+            result.append(s)
+        if len(result) == n:
+            break
+    return result
 
 
 # ── Board canvas widget ───────────────────────────────────────────────────────
@@ -1273,7 +1359,7 @@ def process_scoresheet(image_path: str, output_path: str | None = None) -> str |
         # ── Interactive correction ────────────────────────────────────────────
         if parsed is None:
             print(f"\n  !! Illegal move  {label}  '{raw}'  — opening correction dialog…")
-            suggestions = suggest_similar_moves(board, raw)
+            suggestions = suggest_moves(board, raw)
             dlg = CorrectionDialog(
                 image_path=image_path,
                 board=board,
