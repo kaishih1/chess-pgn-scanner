@@ -1412,22 +1412,71 @@ class FinalReviewDialog:
         self._status.configure(text="Opened in TextEdit — use ⌘P to print")
 
 
+# ── PGN loader ────────────────────────────────────────────────────────────────
+
+def _load_existing_pgn(pgn_path: str) -> list[str]:
+    """Read a PGN file and return a validated list of SAN moves.
+
+    Returns [] if the file is missing, unreadable, or contains an illegal move.
+    """
+    p = Path(pgn_path)
+    if not p.exists():
+        return []
+    try:
+        text = p.read_text()
+        game = chess.pgn.read_game(io.StringIO(text))
+        if game is None:
+            return []
+        board = chess.Board()
+        sans: list[str] = []
+        node = game
+        while node.variations:
+            node = node.variations[0]
+            move = node.move
+            san  = board.san(move)   # raises if illegal
+            board.push(move)
+            sans.append(san)
+        return sans
+    except Exception as exc:
+        print(f"  Warning: could not load existing PGN '{pgn_path}': {exc}")
+        return []
+
+
 # ── Main processing pipeline ──────────────────────────────────────────────────
 
 def process_scoresheet(image_path: str, output_path: str | None = None) -> str | None:
     """
     Full pipeline:
-      1. Claude reads moves from the image.
-      2. Each move is validated with python-chess.
-      3. Illegal moves open the correction GUI.
-      4. Returns the final PGN string (and optionally writes to a file).
+      1. Derive xyz.pgn from the image path; resume from it if it exists.
+      2. Claude reads moves from the image.
+      3. Each move is validated with python-chess.
+      4. Illegal moves open the correction GUI.
+      5. Writes the final PGN to xyz.pgn (or output_path if given).
     """
+    # ── Derive PGN path from image path ──────────────────────────────────────
+    derived_pgn = str(Path(image_path).with_suffix(".pgn"))
+    if output_path is None:
+        output_path = derived_pgn
+
     print(f"\nProcessing: {image_path}")
+    print(f"PGN output:  {output_path}")
     print("─" * 50)
+
+    # ── Try to resume from an existing PGN ───────────────────────────────────
+    confirmed_sans: list[str] = _load_existing_pgn(output_path)
+    if confirmed_sans:
+        print(f"Resuming from '{output_path}' — {len(confirmed_sans)} moves already confirmed.\n")
+    else:
+        confirmed_sans = []
 
     _get_root()
     progress = ProgressWindow()
-    progress.set_status("Sending image to Claude for move extraction…")
+    if confirmed_sans:
+        progress.reset_to(confirmed_sans)
+        resume_num = len(confirmed_sans) // 2 + 1
+        progress.set_status(f"Resuming from move {resume_num} — sending image to Claude…")
+    else:
+        progress.set_status("Sending image to Claude for move extraction…")
     print("Sending image to Claude for move extraction…")
 
     raw_moves = extract_moves_from_image(image_path)
@@ -1439,11 +1488,10 @@ def process_scoresheet(image_path: str, output_path: str | None = None) -> str |
         return None
 
     print(f"Claude extracted {len(raw_moves)} moves: {raw_moves}\n")
-    progress.set_status(f"Validating {len(raw_moves)} half-moves…")
+    progress.set_status(f"Validating from move {len(confirmed_sans) + 1} of {len(raw_moves)}…")
 
     raw_moves = list(raw_moves)   # make mutable for backtrack edits
-    confirmed_sans: list[str] = []
-    idx = 0
+    idx = len(confirmed_sans)     # skip already-confirmed moves
     aborted = False
 
     while idx < len(raw_moves):
@@ -1557,8 +1605,15 @@ def process_scoresheet(image_path: str, output_path: str | None = None) -> str |
 
     print(f"\n{'─'*50}\nFinal PGN:\n{pgn}")
 
+    # Auto-save to xyz.pgn before showing review
+    try:
+        Path(output_path).write_text(pgn)
+        print(f"Saved to {output_path}")
+    except Exception as exc:
+        print(f"Warning: could not auto-save to '{output_path}': {exc}")
+
     n = len(confirmed_sans)
-    progress.set_status(f"Done — {n} moves validated.  Opening final review…")
+    progress.set_status(f"Done — {n} moves validated.  Saved to {Path(output_path).name}")
 
     FinalReviewDialog(game=game, pgn=pgn, default_save_path=output_path)
 
