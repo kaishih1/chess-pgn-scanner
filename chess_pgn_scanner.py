@@ -1171,9 +1171,10 @@ class CorrectionDialog:
             b.push(move)
         game.headers["Result"] = "*"
         pgn = str(game)
+        pgn_path = str(Path(self._image_path).with_suffix(".pgn"))
         self._save_state()
         self._root.withdraw()
-        FinalReviewDialog(game=game, pgn=pgn, default_save_path=None)
+        FinalReviewDialog(game=game, pgn=pgn, default_save_path=pgn_path)
         self._root.deiconify()
 
     def _abort(self):
